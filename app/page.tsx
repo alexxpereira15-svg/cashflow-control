@@ -45,6 +45,13 @@ interface Notificacion {
 export default function Dashboard() {
   const supabase = createClient()
 
+  // Estado de Autenticación
+  const [session, setSession] = useState<any>(null)
+  const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authLoading, setAuthLoading] = useState(false)
+  const [authError, setAuthError] = useState('')
+
   // Navegación del Panel Lateral
   const [activeTab, setActiveTab] = useState<'dashboard' | 'deudas' | 'cajitas' | 'transacciones'>('dashboard')
 
@@ -87,12 +94,64 @@ export default function Dashboard() {
     meta_ahorro: ''
   })
 
+  // Verificar si hay sesión activa al montar el componente
+  useEffect(() => {
+    const checkSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      setSession(session)
+      if (session) {
+        cargarDatos()
+      } else {
+        setLoading(false)
+      }
+    }
+
+    checkSession()
+
+    // Escuchar cambios en el estado de autenticación
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session)
+      if (session) {
+        cargarDatos()
+      } else {
+        setLoading(false)
+      }
+    })
+
+    return () => subscription.unsubscribe()
+  }, [])
+
+  // Iniciar Sesión de forma segura
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setAuthLoading(true)
+    setAuthError('')
+    
+    const { error } = await supabase.auth.signInWithPassword({
+      email: authEmail,
+      password: authPassword,
+    })
+
+    if (error) {
+      setAuthError('Credenciales incorrectas. Verifica tu correo y contraseña.')
+      setAuthLoading(false)
+    }
+  }
+
+  // Cerrar Sesión
+  const handleLogout = async () => {
+    setLoading(true)
+    await supabase.auth.signOut()
+    setSession(null)
+    setDeudas([])
+    setTransacciones([])
+    setCajitas([])
+    setNotificaciones([])
+  }
+
   const cargarDatos = async () => {
     setLoading(true)
     try {
-      const { data: { user } } = await supabase.auth.getUser()
-      const userId = user?.id
-
       // Consultas a Supabase
       const { data: d } = await supabase.from('deudas').select('*')
       const { data: t } = await supabase.from('transacciones').select('*').order('fecha', { ascending: false })
@@ -110,22 +169,17 @@ export default function Dashboard() {
     }
   }
 
-  useEffect(() => {
-    cargarDatos()
-  }, [])
-
   // Guardar Transacción
   const handleTransaccionSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return alert('Debes iniciar sesión')
+    if (!session?.user) return alert('Debes iniciar sesión')
 
     const { error } = await supabase.from('transacciones').insert([{
-      usuario_id: user.id,
+      usuario_id: session.user.id,
       tipo: formTransaccion.tipo,
       monto: parseFloat(formTransaccion.monto),
       categoria: formTransaccion.categoria,
-      subcategoria: formFormulas(formTransaccion.subcategoria),
+      subcategoria: formTransaccion.subcategoria === '' ? null : formTransaccion.subcategoria,
       detalle: formTransaccion.detalle
     }])
 
@@ -137,16 +191,13 @@ export default function Dashboard() {
     }
   }
 
-  const formFormulas = (val: string) => val === '' ? undefined : val
-
   // Guardar Deuda
   const handleDeudaSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return alert('Debes iniciar sesión')
+    if (!session?.user) return alert('Debes iniciar sesión')
 
     const { error } = await supabase.from('deudas').insert([{
-      usuario_id: user.id,
+      usuario_id: session.user.id,
       nombre_deuda: formDeuda.nombre_deuda,
       tipo_deuda: formDeuda.tipo_deuda,
       saldo_total_actual: parseFloat(formDeuda.saldo_total_actual),
@@ -173,11 +224,10 @@ export default function Dashboard() {
   // Guardar Cajita
   const handleCajitaSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return alert('Debes iniciar sesión')
+    if (!session?.user) return alert('Debes iniciar sesión')
 
     const { error } = await supabase.from('cajitas_ahorro').insert([{
-      usuario_id: user.id,
+      usuario_id: session.user.id,
       nombre_cajita: formCajita.nombre_cajita,
       monto_guardado: parseFloat(formCajita.monto_guardado) || 0,
       meta_ahorro: parseFloat(formCajita.meta_ahorro) || null
@@ -206,11 +256,56 @@ export default function Dashboard() {
   const calcularInteresMensualReal = (deuda: Deuda) => {
     const tasaMensualNominal = (deuda.tasa_interes_anual_sin_iva / 100) / 12
     const tasaMensualConIva = deuda.aplica_iva_interes ? tasaMensualNominal * 1.16 : tasaMensualNominal
-    return deuda.saldo_total_actual * tasaMensualConIva
+    return deuda.saldo_total_actual * tasaMensualConIva[cite: 1]
   }
 
   const totalInteresesEstimados = deudas.reduce((acc, d) => acc + calcularInteresMensualReal(d), 0)
 
+  // --- VISTA 1: PANTALLA DE LOGIN SI NO HAY SESIÓN ---
+  if (!session) {
+    return (
+      <div className="min-h-screen bg-gray-950 flex flex-col justify-center items-center p-4">
+        <div className="w-full max-w-md bg-gray-900 border border-gray-800 rounded-2xl p-8 shadow-2xl space-y-6">
+          <div className="text-center space-y-2">
+            <span className="text-4xl">💸</span>
+            <h1 className="text-2xl font-black text-emerald-400 tracking-wider">Cashflow Control</h1>
+            <p className="text-gray-400 text-sm">Ingresa para gestionar tu motor financiero</p>
+          </div>
+
+          <form onSubmit={handleLogin} className="space-y-4">
+            {authError && (
+              <div className="bg-rose-500/10 border border-rose-500/30 text-rose-400 p-3 rounded-lg text-xs text-center font-medium">
+                {authError}
+              </div>
+            )}
+            <div>
+              <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Correo Electrónico</label>
+              <input 
+                type="email" required value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+                className="w-full bg-gray-950 border border-gray-800 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500 transition-all text-sm"
+                placeholder="tu@correo.com" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Contraseña</label>
+              <input 
+                type="password" required value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                className="w-full bg-gray-950 border border-gray-800 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500 transition-all text-sm"
+                placeholder="••••••••" />
+            </div>
+            <button 
+              type="submit" disabled={authLoading}
+              className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-800 text-white font-bold py-3 rounded-lg transition-all text-sm flex justify-center items-center">
+              {authLoading ? 'Iniciando sesión...' : 'Entrar al Dashboard'}
+            </button>
+          </form>
+        </div>
+      </div>
+    )
+  }
+
+  // --- VISTA 2: DASHBOARD COMPLETO (SÓLO SI HAY SESIÓN) ---
   return (
     <div className="flex min-h-screen bg-gray-950 text-gray-100 font-sans">
       
@@ -244,8 +339,13 @@ export default function Dashboard() {
             </button>
           </nav>
         </div>
-        <div className="p-6 border-t border-gray-800">
-          <p className="text-xs text-gray-500">Sesión iniciada correctamente</p>
+        <div className="p-6 border-t border-gray-800 space-y-3">
+          <p className="text-[11px] text-gray-500 truncate">Usuario: {session.user.email}</p>
+          <button 
+            onClick={handleLogout}
+            className="w-full bg-gray-850 hover:bg-gray-800 text-xs py-2 rounded border border-gray-800 transition-all font-semibold text-rose-400">
+            Cerrar Sesión 🚪
+          </button>
         </div>
       </aside>
 
@@ -348,7 +448,7 @@ export default function Dashboard() {
                       </div>
                       <div className="space-y-4">
                         {deudas.slice(0, 3).map(d => {
-                          const interesMensual = calcularInteresMensualReal(d)
+                          const interesMensual = calcularInteresMensualReal(d)[cite: 1]
                           return (
                             <div key={d.id} className="p-3 bg-gray-950 rounded border border-gray-800 flex justify-between items-center">
                               <div>
@@ -392,7 +492,7 @@ export default function Dashboard() {
                 </div>
               )}
 
-              {/* TAB 2: DETALLE DE DEUDAS (AMORTIZACIÓN COMPLETA) */}
+              {/* TAB 2: DETALLE DE DEUDAS */}
               {activeTab === 'deudas' && (
                 <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl space-y-6">
                   <div className="flex justify-between items-center">
@@ -413,7 +513,7 @@ export default function Dashboard() {
                       </thead>
                       <tbody className="divide-y divide-gray-800 text-sm">
                         {deudas.map(d => {
-                          const interesMensual = calcularInteresMensualReal(d)
+                          const interesMensual = calcularInteresMensualReal(d)[cite: 1]
                           return (
                             <tr key={d.id} className="hover:bg-gray-850">
                               <td className="py-4 font-semibold text-gray-200">{d.nombre_deuda}</td>
@@ -507,7 +607,7 @@ export default function Dashboard() {
         </main>
       </div>
 
-      {/* --- RE-DIRECCIONADO DE MODALES DE REGISTRO --- */}
+      {/* --- MODALES DE REGISTRO --- */}
 
       {/* MODAL TRANSACCIONES */}
       {showTransaccionModal && (
