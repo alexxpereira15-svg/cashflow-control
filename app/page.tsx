@@ -256,7 +256,7 @@ export default function Dashboard() {
   const calcularInteresMensualReal = (deuda: Deuda) => {
     const tasaMensualNominal = (deuda.tasa_interes_anual_sin_iva / 100) / 12
     const tasaMensualConIva = deuda.aplica_iva_interes ? tasaMensualNominal * 1.16 : tasaMensualNominal
-    return deuda.saldo_total_actual * tasaMensualConIva[cite: 1]
+    return deuda.saldo_total_actual * tasaMensualConIva
   }
 
   const totalInteresesEstimados = deudas.reduce((acc, d) => acc + calcularInteresMensualReal(d), 0)
@@ -448,7 +448,7 @@ export default function Dashboard() {
                       </div>
                       <div className="space-y-4">
                         {deudas.slice(0, 3).map(d => {
-                          const interesMensual = calcularInteresMensualReal(d)[cite: 1]
+                          const interesMensual = calcularInteresMensualReal(d)
                           return (
                             <div key={d.id} className="p-3 bg-gray-950 rounded border border-gray-800 flex justify-between items-center">
                               <div>
@@ -513,7 +513,7 @@ export default function Dashboard() {
                       </thead>
                       <tbody className="divide-y divide-gray-800 text-sm">
                         {deudas.map(d => {
-                          const interesMensual = calcularInteresMensualReal(d)[cite: 1]
+                          const interesMensual = calcularInteresMensualReal(d)
                           return (
                             <tr key={d.id} className="hover:bg-gray-850">
                               <td className="py-4 font-semibold text-gray-200">{d.nombre_deuda}</td>
