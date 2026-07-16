@@ -1,0 +1,26 @@
+{
+  "pages": {
+    "/_app": []
+  },
+  "devFiles": [],
+  "polyfillFiles": [
+    "static/chunks/0eiz_next_dist_build_polyfills_polyfill-nomodule.js"
+  ],
+  "lowPriorityFiles": [
+    "static/development/_buildManifest.js",
+    "static/development/_ssgManifest.js",
+    "static/development/_clientMiddlewareManifest.js"
+  ],
+  "rootMainFiles": [
+    "static/chunks/[turbopack]_browser_dev_hmr-client_hmr-client_ts_05i6frq._.js",
+    "static/chunks/0eiz_next_dist_compiled_next-devtools_index_1oe7dc1.js",
+    "static/chunks/0eiz_next_dist_compiled_react-dom_0suq1_8._.js",
+    "static/chunks/0eiz_next_dist_compiled_react-server-dom-turbopack_0p4owtu._.js",
+    "static/chunks/0eiz_next_dist_compiled_07gnr6x._.js",
+    "static/chunks/0eiz_next_dist_client_0fu_250._.js",
+    "static/chunks/0eiz_next_dist_19obtd2._.js",
+    "static/chunks/0eiz_@swc_helpers_cjs_1k2mq94._.js",
+    "static/chunks/cashflow-control_1anvha4._.js",
+    "static/chunks/turbopack-cashflow-control_0-0tl4p._.js"
+  ]
+}
