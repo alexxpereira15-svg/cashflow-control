@@ -88,6 +88,10 @@ export default function Dashboard() {
     dia_pago: ''
   })
 
+  // Estado para la Deuda seleccionada en el Amortizador Interactivo de la pestaña "Deudas"
+  const [deudaSeleccionadaAmortizar, setDeudaSeleccionadaAmortizar] = useState<Deuda | null>(null)
+  const [pagoMensualSimulado, setPagoMensualSimulado] = useState<number>(0)
+
   const [formCajita, setFormCajita] = useState({
     nombre_cajita: '',
     monto_guardado: '',
@@ -158,7 +162,14 @@ export default function Dashboard() {
       const { data: c } = await supabase.from('cajitas_ahorro').select('*')
       const { data: n } = await supabase.from('notificaciones').select('*').order('creado_en', { ascending: false })
 
-      if (d) setDeudas(d)
+      if (d) {
+        setDeudas(d)
+        // Auto-seleccionar la primera deuda para el simulador si existe
+        if (d.length > 0) {
+          setDeudaSeleccionadaAmortizar(d[0])
+          setPagoMensualSimulado(Math.round(d[0].pago_minimo_sugerido * 1.5 || d[0].saldo_total_actual * 0.1))
+        }
+      }
       if (t) setTransacciones(t)
       if (c) setCajitas(c)
       if (n) setNotificaciones(n)
@@ -253,13 +264,60 @@ export default function Dashboard() {
   const saldoDisponible = ingresos - gastos
 
   // Calcular Interés Mensual Estimado de las deudas (Fórmula con IVA del Plan Técnico)
-  const calcularInteresMensualReal = (deuda: Deuda) => {
-    const tasaMensualNominal = (deuda.tasa_interes_anual_sin_iva / 100) / 12
-    const tasaMensualConIva = deuda.aplica_iva_interes ? tasaMensualNominal * 1.16 : tasaMensualNominal
-    return deuda.saldo_total_actual * tasaMensualConIva
+  const calcularInteresMensualReal = (saldo: number, tasaAnual: number, conIva: boolean) => {
+    const tasaMensualNominal = (tasaAnual / 100) / 12
+    const tasaMensualConIva = conIva ? tasaMensualNominal * 1.16 : tasaMensualNominal
+    return saldo * tasaMensualConIva
   }
 
-  const totalInteresesEstimados = deudas.reduce((acc, d) => acc + calcularInteresMensualReal(d), 0)
+  const totalInteresesEstimados = deudas.reduce((acc, d) => acc + calcularInteresMensualReal(d.saldo_total_actual, d.tasa_interes_anual_sin_iva, d.aplica_iva_interes), 0)
+
+  // --- SIMULACIÓN DE AMORTIZACIÓN EN TIEMPO REAL (MÉTODO BOLA DE NIEVE / FRACCIONAL) ---
+  const simularAmortizacion = (deuda: Deuda, pagoMensual: number) => {
+    const simulacion = []
+    let saldoRestante = deuda.saldo_total_actual
+    const tasaAnual = deuda.tasa_interes_anual_sin_iva
+    let mes = 1
+    let totalInteresesPagados = 0
+
+    // Evitar bucles infinitos si el pago es menor al interés mensual generado
+    const interesPrimerMes = calcularInteresMensualReal(saldoRestante, tasaAnual, deuda.aplica_iva_interes)
+    if (pagoMensual <= interesPrimerMes && saldoRestante > 0) {
+      return {
+        error: true,
+        mensaje: `El pago mensual ($${pagoMensual}) debe ser mayor al interés generado del primer mes ($${interesPrimerMes.toFixed(2)}) para poder amortizar la deuda.`,
+        tabla: []
+      }
+    }
+
+    while (saldoRestante > 0 && mes <= 36) { // Límite de control a 3 años
+      const interesDelMes = calcularInteresMensualReal(saldoRestante, tasaAnual, deuda.aplica_iva_interes)
+      const abonoCapital = Math.min(pagoMensual - interesDelMes, saldoRestante)
+      const pagoEfectivo = abonoCapital + interesDelMes
+      
+      saldoRestante -= abonoCapital
+      totalInteresesPagados += interesDelMes
+
+      simulacion.push({
+        mes,
+        saldoInicial: saldoRestante + abonoCapital,
+        pago: pagoEfectivo,
+        interes: interesDelMes,
+        capital: abonoCapital,
+        saldoFinal: Math.max(saldoRestante, 0)
+      })
+
+      mes++
+    }
+
+    return { error: false, tabla: simulacion, totalIntereses: totalInteresesPagados, meses: mes - 1 }
+  }
+
+  // Simulación en tiempo real para el formulario de registro (Inputs vivos)
+  const simTasa = parseFloat(formDeuda.tasa_interes_anual_sin_iva) || 0
+  const simSaldo = parseFloat(formDeuda.saldo_total_actual) || 0
+  const simConIva = formDeuda.aplica_iva_interes
+  const interesFormularioVivo = calcularInteresMensualReal(simSaldo, simTasa, simConIva)
 
   // --- VISTA 1: PANTALLA DE LOGIN SI NO HAY SESIÓN ---
   if (!session) {
@@ -448,7 +506,7 @@ export default function Dashboard() {
                       </div>
                       <div className="space-y-4">
                         {deudas.slice(0, 3).map(d => {
-                          const interesMensual = calcularInteresMensualReal(d)
+                          const interesMensual = calcularInteresMensualReal(d.saldo_total_actual, d.tasa_interes_anual_sin_iva, d.aplica_iva_interes)
                           return (
                             <div key={d.id} className="p-3 bg-gray-950 rounded border border-gray-800 flex justify-between items-center">
                               <div>
@@ -492,42 +550,164 @@ export default function Dashboard() {
                 </div>
               )}
 
-              {/* TAB 2: DETALLE DE DEUDAS */}
+              {/* TAB 2: DETALLE DE DEUDAS & AMORTIZADOR DINÁMICO */}
               {activeTab === 'deudas' && (
-                <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl space-y-6">
-                  <div className="flex justify-between items-center">
-                    <h3 className="font-bold text-lg text-rose-400">Detalle de Instrumentos Financieros y Tarjetas</h3>
-                    <button onClick={() => setShowDeudaModal(true)} className="bg-rose-600 hover:bg-rose-500 px-4 py-2 rounded text-sm font-bold transition-all">Añadir Nueva Deuda</button>
+                <div className="space-y-8">
+                  {/* Listado Principal de Deudas */}
+                  <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl space-y-6">
+                    <div className="flex justify-between items-center">
+                      <h3 className="font-bold text-lg text-rose-400">Detalle de Instrumentos Financieros y Tarjetas</h3>
+                      <button onClick={() => setShowDeudaModal(true)} className="bg-rose-600 hover:bg-rose-500 px-4 py-2 rounded text-sm font-bold transition-all">Añadir Nueva Deuda</button>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="border-b border-gray-800 text-gray-400 text-sm">
+                            <th className="pb-3">Deuda / Banco</th>
+                            <th className="pb-3">Tipo</th>
+                            <th className="pb-3">Saldo</th>
+                            <th className="pb-3">Tasa (+ IVA)</th>
+                            <th className="pb-3">Pago No Gen. Interés</th>
+                            <th className="pb-3 text-right">Interés Mensual Real (Con IVA)</th>
+                            <th className="pb-3 text-center">Acción</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-800 text-sm">
+                          {deudas.map(d => {
+                            const interesMensual = calcularInteresMensualReal(d.saldo_total_actual, d.tasa_interes_anual_sin_iva, d.aplica_iva_interes)
+                            return (
+                              <tr key={d.id} className={`hover:bg-gray-850 transition-colors ${deudaSeleccionadaAmortizar?.id === d.id ? 'bg-rose-950/20' : ''}`}>
+                                <td className="py-4 font-semibold text-gray-200">{d.nombre_deuda}</td>
+                                <td className="py-4 uppercase text-xs text-gray-400">{d.tipo_deuda.replace('_', ' ')}</td>
+                                <td className="py-4 font-bold text-rose-400">${d.saldo_total_actual.toLocaleString('es-MX')}</td>
+                                <td className="py-4 text-gray-300">{d.tasa_interes_anual_sin_iva}% {d.aplica_iva_interes ? '+ IVA' : 'Sin IVA'}</td>
+                                <td className="py-4 text-emerald-400 font-medium">${d.pago_para_no_generar_intereses.toLocaleString('es-MX')}</td>
+                                <td className="py-4 text-right font-bold text-rose-500">${interesMensual.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</td>
+                                <td className="py-4 text-center">
+                                  <button 
+                                    onClick={() => {
+                                      setDeudaSeleccionadaAmortizar(d)
+                                      setPagoMensualSimulado(Math.round(d.pago_minimo_sugerido * 1.5 || d.saldo_total_actual * 0.1))
+                                    }}
+                                    className="px-3 py-1 bg-rose-600/20 hover:bg-rose-600/40 text-rose-400 border border-rose-500/30 rounded text-xs transition-all font-semibold">
+                                    Simular 📈
+                                  </button>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className="border-b border-gray-800 text-gray-400 text-sm">
-                          <th className="pb-3">Deuda / Banco</th>
-                          <th className="pb-3">Tipo</th>
-                          <th className="pb-3">Saldo</th>
-                          <th className="pb-3">Tasa (+ IVA)</th>
-                          <th className="pb-3">Pago No Gen. Interés</th>
-                          <th className="pb-3 text-right">Interés Mensual Real (Con IVA)</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-800 text-sm">
-                        {deudas.map(d => {
-                          const interesMensual = calcularInteresMensualReal(d)
+
+                  {/* SECCIÓN INTERACTIVA: AMORTIZADOR EN TIEMPO REAL */}
+                  {deudaSeleccionadaAmortizar && (
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 bg-gray-900 border border-gray-800 p-6 rounded-xl">
+                      
+                      {/* Inputs de la simulación */}
+                      <div className="lg:col-span-1 space-y-4 border-r border-gray-800 pr-6">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xl">📊</span>
+                          <h4 className="font-bold text-gray-100">Amortizador Dinámico</h4>
+                        </div>
+                        <p className="text-xs text-gray-400">
+                          Simulando amortización para <span className="text-rose-400 font-semibold">{deudaSeleccionadaAmortizar.nombre_deuda}</span>
+                        </p>
+                        
+                        <div className="bg-gray-950 p-4 rounded-lg border border-gray-800 space-y-2">
+                          <div className="flex justify-between text-xs text-gray-400">
+                            <span>Saldo Inicial:</span>
+                            <span className="font-semibold text-white">${deudaSeleccionadaAmortizar.saldo_total_actual.toLocaleString('es-MX')}</span>
+                          </div>
+                          <div className="flex justify-between text-xs text-gray-400">
+                            <span>Interés Mensual Inicial:</span>
+                            <span className="font-semibold text-rose-400">
+                              ${calcularInteresMensualReal(deudaSeleccionadaAmortizar.saldo_total_actual, deudaSeleccionadaAmortizar.tasa_interes_anual_sin_iva, deudaSeleccionadaAmortizar.aplica_iva_interes).toFixed(2)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="block text-xs font-bold text-gray-400 uppercase">Ajustar Pago Mensual ($ MXN)</label>
+                          <input 
+                            type="range" 
+                            min={Math.ceil(calcularInteresMensualReal(deudaSeleccionadaAmortizar.saldo_total_actual, deudaSeleccionadaAmortizar.tasa_interes_anual_sin_iva, deudaSeleccionadaAmortizar.aplica_iva_interes) + 50)} 
+                            max={deudaSeleccionadaAmortizar.saldo_total_actual} 
+                            value={pagoMensualSimulado}
+                            onChange={(e) => setPagoMensualSimulado(parseFloat(e.target.value))}
+                            className="w-full accent-rose-500 bg-gray-800 h-1.5 rounded-lg appearance-none cursor-pointer"
+                          />
+                          <div className="flex justify-between items-center gap-2">
+                            <input 
+                              type="number"
+                              value={pagoMensualSimulado}
+                              onChange={(e) => setPagoMensualSimulado(parseFloat(e.target.value) || 0)}
+                              className="w-1/2 bg-gray-950 border border-gray-800 rounded px-2 py-1 text-sm font-bold text-white text-center focus:outline-none focus:border-rose-500"
+                            />
+                            <span className="text-xs text-gray-500">Al mes</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Resultados de la Simulación en Tiempo Real */}
+                      <div className="lg:col-span-2 space-y-4">
+                        {(() => {
+                          const res = simularAmortizacion(deudaSeleccionadaAmortizar, pagoMensualSimulado)
+                          if (res.error) {
+                            return (
+                              <div className="bg-rose-500/10 border border-rose-500/30 text-rose-400 p-4 rounded-lg text-xs font-medium flex items-center justify-center h-full">
+                                ⚠️ {res.mensaje}
+                              </div>
+                            )
+                          }
+
                           return (
-                            <tr key={d.id} className="hover:bg-gray-850">
-                              <td className="py-4 font-semibold text-gray-200">{d.nombre_deuda}</td>
-                              <td className="py-4 uppercase text-xs text-gray-400">{d.tipo_deuda.replace('_', ' ')}</td>
-                              <td className="py-4 font-bold text-rose-400">${d.saldo_total_actual.toLocaleString('es-MX')}</td>
-                              <td className="py-4 text-gray-300">{d.tasa_interes_anual_sin_iva}% {d.aplica_iva_interes ? '+ IVA' : 'Sin IVA'}</td>
-                              <td className="py-4 text-emerald-400 font-medium">${d.pago_para_no_generar_intereses.toLocaleString('es-MX')}</td>
-                              <td className="py-4 text-right font-bold text-rose-500">${interesMensual.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                            </tr>
+                            <div className="space-y-4">
+                              {/* Tarjetas de Diagnóstico Rápido */}
+                              <div className="grid grid-cols-2 gap-4">
+                                <div className="bg-gray-950 p-4 rounded-lg border border-gray-800 text-center">
+                                  <p className="text-[10px] text-gray-500 uppercase font-bold">Tiempo para Liquidar</p>
+                                  <h5 className="text-2xl font-black text-emerald-400 mt-1">{res.meses} {res.meses === 1 ? 'mes' : 'meses'}</h5>
+                                </div>
+                                <div className="bg-gray-950 p-4 rounded-lg border border-gray-800 text-center">
+                                  <p className="text-[10px] text-gray-500 uppercase font-bold">Interés Total a Pagar</p>
+                                  <h5 className="text-2xl font-black text-rose-400 mt-1">${res.totalIntereses.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</h5>
+                                </div>
+                              </div>
+
+                              {/* Mini Tabla de Amortización Generada */}
+                              <div className="max-h-48 overflow-y-auto border border-gray-800 rounded-lg">
+                                <table className="w-full text-xs text-left border-collapse">
+                                  <thead className="bg-gray-950 sticky top-0 text-gray-400">
+                                    <tr className="border-b border-gray-800">
+                                      <th className="p-2">Mes</th>
+                                      <th className="p-2">S. Inicial</th>
+                                      <th className="p-2">Abono Capital</th>
+                                      <th className="p-2">Interés (IVA)</th>
+                                      <th className="p-2 text-right">S. Final</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-gray-800 text-gray-300">
+                                    {res.tabla.map((row) => (
+                                      <tr key={row.mes} className="hover:bg-gray-850">
+                                        <td className="p-2 font-semibold text-emerald-400">{row.mes}</td>
+                                        <td className="p-2">${row.saldoInicial.toLocaleString('es-MX', { maximumFractionDigits: 2 })}</td>
+                                        <td className="p-2 text-emerald-400">${row.capital.toLocaleString('es-MX', { maximumFractionDigits: 2 })}</td>
+                                        <td className="p-2 text-rose-400">${row.interes.toLocaleString('es-MX', { maximumFractionDigits: 2 })}</td>
+                                        <td className="p-2 text-right font-medium">${row.saldoFinal.toLocaleString('es-MX', { maximumFractionDigits: 2 })}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
                           )
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
+                        })()}
+                      </div>
+
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -671,88 +851,135 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* MODAL DEUDAS */}
+      {/* MODAL DEUDAS (CON SIMULADOR EN TIEMPO REAL VIVO) */}
       {showDeudaModal && (
         <div className="fixed inset-0 bg-black/85 flex justify-center items-center p-4 z-50 backdrop-blur-sm">
-          <div className="bg-gray-900 rounded-xl p-6 max-w-md w-full border border-gray-800">
-            <h3 className="text-xl font-bold mb-4 text-rose-400">Añadir Nueva Deuda / Crédito</h3>
-            <form onSubmit={handleDeudaSubmit} className="space-y-4">
+          <div className="bg-gray-900 rounded-xl p-6 max-w-lg w-full border border-gray-800 grid grid-cols-1 md:grid-cols-12 gap-6">
+            
+            {/* Formulario de Captura */}
+            <div className="md:col-span-7 space-y-4">
+              <h3 className="text-xl font-bold text-rose-400">Añadir Nueva Deuda / Crédito</h3>
+              <form onSubmit={handleDeudaSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Nombre de la Deuda</label>
+                  <input 
+                    type="text" required value={formDeuda.nombre_deuda}
+                    onChange={(e) => setFormDeuda({...formDeuda, nombre_deuda: e.target.value})}
+                    className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white text-sm" 
+                    placeholder="Ej. Banregio Platino" />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Tipo de Deuda</label>
+                    <select 
+                      value={formDeuda.tipo_deuda} 
+                      onChange={(e) => setFormDeuda({...formDeuda, tipo_deuda: e.target.value})}
+                      className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white text-xs">
+                      <option value="tarjeta_credito">Tarjeta de Crédito</option>
+                      <option value="prestamo_fijo">Préstamo Fijo</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Tasa Anual (%)</label>
+                    <input 
+                      type="number" step="0.01" required value={formDeuda.tasa_interes_anual_sin_iva}
+                      onChange={(e) => setFormDeuda({...formDeuda, tasa_interes_anual_sin_iva: e.target.value})}
+                      className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white text-sm" 
+                      placeholder="45" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Saldo Actual ($)</label>
+                    <input 
+                      type="number" step="0.01" required value={formDeuda.saldo_total_actual}
+                      onChange={(e) => setFormDeuda({...formDeuda, saldo_total_actual: e.target.value})}
+                      className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white text-sm" 
+                      placeholder="12500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Día de Pago (Mensual)</label>
+                    <input 
+                      type="number" min="1" max="31" required value={formDeuda.dia_pago}
+                      onChange={(e) => setFormDeuda({...formDeuda, dia_pago: e.target.value})}
+                      className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white text-sm" 
+                      placeholder="16" />
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 py-1">
+                  <input 
+                    type="checkbox" id="aplica_iva" checked={formDeuda.aplica_iva_interes}
+                    onChange={(e) => setFormDeuda({...formDeuda, aplica_iva_interes: e.target.checked})}
+                    className="w-4 h-4 text-rose-500 bg-gray-950 border-gray-800 rounded" />
+                  <label htmlFor="aplica_iva" className="text-[11px] text-gray-300">Aplicar IVA (16%) en interés[cite: 1]</label>
+                </div>
+                <div className="grid grid-cols-2 gap-2 border-t border-gray-800 pt-3">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Pago No Gen. Int.</label>
+                    <input 
+                      type="number" step="0.01" value={formDeuda.pago_para_no_generar_intereses}
+                      onChange={(e) => setFormDeuda({...formDeuda, pago_para_no_generar_intereses: e.target.value})}
+                      className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white text-sm" 
+                      placeholder="Opcional" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Pago Mínimo</label>
+                    <input 
+                      type="number" step="0.01" value={formDeuda.pago_minimo_sugerido}
+                      onChange={(e) => setFormDeuda({...formDeuda, pago_minimo_sugerido: e.target.value})}
+                      className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white text-sm" 
+                      placeholder="Opcional" />
+                  </div>
+                </div>
+                <div className="flex gap-2 justify-end pt-2">
+                  <button type="button" onClick={() => setShowDeudaModal(false)} className="px-4 py-2 bg-gray-800 rounded-lg hover:bg-gray-700 text-xs">Cancelar</button>
+                  <button type="submit" className="px-4 py-2 bg-rose-600 hover:bg-rose-500 rounded-lg text-xs font-bold text-white">Guardar Deuda</button>
+                </div>
+              </form>
+            </div>
+
+            {/* Diagnóstico en Vivo al Costado */}
+            <div className="md:col-span-5 bg-gray-950 p-4 rounded-xl border border-gray-800 flex flex-col justify-between">
               <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Nombre de la Deuda</label>
-                <input 
-                  type="text" required value={formDeuda.nombre_deuda}
-                  onChange={(e) => setFormDeuda({...formDeuda, nombre_deuda: e.target.value})}
-                  className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white" 
-                  placeholder="Ej. Banregio Platino" />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Tipo de Deuda</label>
-                  <select 
-                    value={formDeuda.tipo_deuda} 
-                    onChange={(e) => setFormDeuda({...formDeuda, tipo_deuda: e.target.value})}
-                    className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white text-xs">
-                    <option value="tarjeta_credito">Tarjeta de Crédito</option>
-                    <option value="prestamo_fijo">Préstamo Fijo</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Tasa Interés Anual (%)</label>
-                  <input 
-                    type="number" step="0.01" required value={formDeuda.tasa_interes_anual_sin_iva}
-                    onChange={(e) => setFormDeuda({...formDeuda, tasa_interes_anual_sin_iva: e.target.value})}
-                    className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white" 
-                    placeholder="45" />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Saldo Actual ($)</label>
-                  <input 
-                    type="number" step="0.01" required value={formDeuda.saldo_total_actual}
-                    onChange={(e) => setFormDeuda({...formDeuda, saldo_total_actual: e.target.value})}
-                    className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white" 
-                    placeholder="12500" />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Día de Pago (Mensual)</label>
-                  <input 
-                    type="number" min="1" max="31" required value={formDeuda.dia_pago}
-                    onChange={(e) => setFormDeuda({...formDeuda, dia_pago: e.target.value})}
-                    className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white" 
-                    placeholder="16" />
+                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Diagnóstico en Tiempo Real</h4>
+                <p className="text-[10px] text-gray-500 mb-4">Métricas preliminares basadas en tus inputs actuales:</p>
+                
+                <div className="space-y-4">
+                  <div>
+                    <span className="text-[10px] text-gray-400 block">Interés Mensual Estimado:</span>
+                    <span className="text-lg font-black text-rose-400">
+                      ${interesFormularioVivo.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                  
+                  <div>
+                    <span className="text-[10px] text-gray-400 block">Componente de IVA (16%):</span>
+                    <span className="text-sm font-semibold text-gray-300">
+                      ${(simConIva ? (interesFormularioVivo / 1.16) * 0.16 : 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] text-gray-400 block">Proporción del saldo/interés:</span>
+                    <div className="w-full h-1.5 bg-gray-900 rounded-full mt-1 overflow-hidden">
+                      <div 
+                        className="bg-rose-500 h-full rounded-full" 
+                        style={{ width: `${simSaldo > 0 ? Math.min((interesFormularioVivo / simSaldo) * 100, 100) : 0}%` }}
+                      ></div>
+                    </div>
+                  </div>
                 </div>
               </div>
-              <div className="flex items-center gap-2 py-2">
-                <input 
-                  type="checkbox" id="aplica_iva" checked={formDeuda.aplica_iva_interes}
-                  onChange={(e) => setFormDeuda({...formDeuda, aplica_iva_interes: e.target.checked})}
-                  className="w-4 h-4 text-rose-500 bg-gray-950 border-gray-800 rounded" />
-                <label htmlFor="aplica_iva" className="text-xs text-gray-300">Aplicar IVA (16%) en cálculo de intereses mensual[cite: 1]</label>
+
+              <div className="bg-rose-500/5 border border-rose-500/10 p-3 rounded-lg text-[10px] text-rose-400 mt-4">
+                💡 Los intereses se calculan bajo la fórmula mensual: 
+                <br />
+                <code className="text-white block mt-1 font-mono">
+                  saldo * (tasa_anual / 12) {simConIva ? '* 1.16' : ''}[cite: 1]
+                </code>
               </div>
-              <div className="grid grid-cols-2 gap-2 border-t border-gray-800 pt-3">
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Para No Gen. Intereses</label>
-                  <input 
-                    type="number" step="0.01" value={formDeuda.pago_para_no_generar_intereses}
-                    onChange={(e) => setFormDeuda({...formDeuda, pago_para_no_generar_intereses: e.target.value})}
-                    className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white" 
-                    placeholder="Opcional" />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Pago Mínimo</label>
-                  <input 
-                    type="number" step="0.01" value={formDeuda.pago_minimo_sugerido}
-                    onChange={(e) => setFormDeuda({...formDeuda, pago_minimo_sugerido: e.target.value})}
-                    className="w-full bg-gray-950 border border-gray-800 rounded-lg p-2.5 text-white" 
-                    placeholder="Opcional" />
-                </div>
-              </div>
-              <div className="flex gap-2 justify-end pt-2">
-                <button type="button" onClick={() => setShowDeudaModal(false)} className="px-4 py-2 bg-gray-800 rounded-lg hover:bg-gray-700 text-sm">Cancelar</button>
-                <button type="submit" className="px-4 py-2 bg-rose-600 hover:bg-rose-500 rounded-lg text-sm font-bold text-white">Guardar Deuda</button>
-              </div>
-            </form>
+            </div>
+
           </div>
         </div>
       )}
